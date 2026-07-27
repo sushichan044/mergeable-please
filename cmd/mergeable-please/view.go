@@ -1,4 +1,4 @@
-package cmd
+package main
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 	"github.com/sushichan044/mergeable-please/internal/output"
 )
 
-func newViewCmd(d deps) *cobra.Command {
+func newViewCmd(r runner) *cobra.Command {
 	var conditionFlag string
 
 	cmd := &cobra.Command{
@@ -33,7 +33,7 @@ func newViewCmd(d deps) *cobra.Command {
 		Args:         cobra.MaximumNArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runView(cmd.Context(), d, conditionFlag, args)
+			return runView(cmd.Context(), r, conditionFlag, args)
 		},
 	}
 
@@ -45,113 +45,96 @@ func newViewCmd(d deps) *cobra.Command {
 	return cmd
 }
 
-func runView(ctx context.Context, d deps, condition string, args []string) error {
+func runView(ctx context.Context, r runner, condition string, args []string) error {
 	var prArg string
 	if len(args) > 0 {
 		prArg = args[0]
 	}
 
-	pr, err := resolvePR(ctx, prArg, d.resolver)
-	if err != nil {
-		return fmt.Errorf("could not resolve PR: %w", err)
-	}
-
 	switch condition {
 	case "rules":
-		return runViewRules(ctx, d, pr)
+		return runViewRules(ctx, r, prArg)
 	case "reviewers":
-		return runViewReviewers(ctx, d, pr)
+		return runViewReviewers(ctx, r, prArg)
 	case "checks":
 		// Show only check-related conditions; omit global status (reviewer loop not evaluated).
-		result, evalErr := d.bundledEvaluate(ctx, pr)
-		if evalErr != nil {
-			return fmt.Errorf("could not evaluate PR: %w", evalErr)
+		report, err := r.app.Evaluate(ctx, prArg)
+		if err != nil {
+			return err
 		}
-		blockers := filterConditionsByKind(result.Blockers, core.ConditionCheckFailing, core.ConditionCheckPending)
-		return output.RenderDimensionView(d.out, blockers, nil, pr.Target())
+		blockers := filterConditionsByKind(
+			report.Result.Blockers,
+			core.ConditionCheckFailing,
+			core.ConditionCheckPending,
+		)
+		return output.RenderDimensionView(r.out, blockers, nil, report.PR.Target())
 	case "conflicts":
 		// Show only conflict-related conditions; omit global status.
-		result, evalErr := d.bundledEvaluate(ctx, pr)
-		if evalErr != nil {
-			return fmt.Errorf("could not evaluate PR: %w", evalErr)
+		report, err := r.app.Evaluate(ctx, prArg)
+		if err != nil {
+			return err
 		}
-		blockers := filterConditionsByKind(result.Blockers, core.ConditionConflict, core.ConditionBehindBase)
-		return output.RenderDimensionView(d.out, blockers, nil, pr.Target())
+		blockers := filterConditionsByKind(report.Result.Blockers, core.ConditionConflict, core.ConditionBehindBase)
+		return output.RenderDimensionView(r.out, blockers, nil, report.PR.Target())
 	case "":
 		// Full dimension view: all conditions, but no global status verdict.
-		result, evalErr := d.bundledEvaluate(ctx, pr)
-		if evalErr != nil {
-			return fmt.Errorf("could not evaluate PR: %w", evalErr)
+		report, err := r.app.Evaluate(ctx, prArg)
+		if err != nil {
+			return err
 		}
-		return output.RenderDimensionView(d.out, result.Blockers, result.Advisories, pr.Target())
+		return output.RenderDimensionView(r.out, report.Result.Blockers, report.Result.Advisories, report.PR.Target())
 	default:
 		return fmt.Errorf("unknown --condition %q: must be conflicts, checks, rules, or reviewers", condition)
 	}
 }
 
-func runViewRules(ctx context.Context, d deps, pr github.PR) error {
-	if _, err := fmt.Fprintf(d.out, "target: %s\n", pr.Target()); err != nil {
-		return err
-	}
-	if d.fetchBranchRules == nil {
-		_, err := fmt.Fprintln(d.out, "Branch rules are not available in this configuration.")
-		return err
-	}
-
-	rules, err := d.fetchBranchRules(ctx, pr)
-	if err != nil {
-		return fmt.Errorf("could not fetch branch rules: %w", err)
-	}
-
-	if len(rules) == 0 {
-		_, err = fmt.Fprintln(d.out, "No branch rules configured.")
-		return err
-	}
-
-	_, err = fmt.Fprintf(d.out, "Branch rules (%d):\n", len(rules))
+func runViewRules(ctx context.Context, r runner, prArg string) error {
+	// fetchBranchRules is always wired in production via Execute(); nil is test-only.
+	report, err := r.app.BranchRules(ctx, prArg)
 	if err != nil {
 		return err
 	}
 
-	for _, r := range rules {
-		if _, err = fmt.Fprintf(d.out, "  - type: %s\n", r.Type); err != nil {
+	// Use = (not :=) throughout to avoid shadowing the outer err declaration.
+	if _, err = fmt.Fprintf(r.out, "target: %s\n", report.PR.Target()); err != nil {
+		return err
+	}
+
+	if len(report.Rules) == 0 {
+		_, err = fmt.Fprintln(r.out, "No branch rules configured.")
+		return err
+	}
+
+	if _, err = fmt.Fprintf(r.out, "Branch rules (%d):\n", len(report.Rules)); err != nil {
+		return err
+	}
+
+	for _, rule := range report.Rules {
+		if _, err = fmt.Fprintf(r.out, "  - type: %s\n", rule.Type); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func runViewReviewers(ctx context.Context, d deps, pr github.PR) error {
-	policies, err := resolvePolicies(d)
+func runViewReviewers(ctx context.Context, r runner, prArg string) error {
+	report, err := r.app.Reviewers(ctx, prArg)
 	if err != nil {
 		return err
 	}
 
-	if len(policies) == 0 {
-		_, err = fmt.Fprintln(d.out,
+	if report.NoReviewers {
+		_, err = fmt.Fprintln(r.out,
 			"No reviewers configured. Add reviewers to .mergeable-please.yml to enable the reviewer loop.")
 		return err
 	}
 
-	snapshot, err := d.fetchSnapshot(ctx, pr, policies)
-	if err != nil {
-		return fmt.Errorf("could not fetch reviewer snapshot: %w", err)
-	}
-
-	allCommentsByKey, err := d.threadComments(ctx, pr, policies)
-	if err != nil {
-		return fmt.Errorf("could not fetch thread comments: %w", err)
-	}
-
-	loopState := reviewer.EvaluateLoop(policies, snapshot)
-	view := buildLoopView(loopState, policies, allCommentsByKey, pr)
-
-	return output.Render(d.out, view, pr.Target())
+	view := buildLoopView(report.LoopState, report.Policies, report.CommentsByKey, report.PR)
+	return output.Render(r.out, view, report.PR.Target())
 }
 
 // reviewBodyDrillIn returns a gh command that prints a single review's body
-// (pullrequestreview.body) via the REST API. Reviews are addressed by their
-// numeric databaseId. Returns "" when no review id is available.
+// via the REST API. Returns "" when no review id is available.
 func reviewBodyDrillIn(pr github.PR, reviewID string) string {
 	if reviewID == "" {
 		return ""
@@ -173,7 +156,6 @@ func buildLoopView(
 	}
 
 	reviewerViews := make([]output.ReviewerView, 0, len(state.Reviewers))
-
 	for _, rs := range state.Reviewers {
 		p := policyByIdentity[rs.Identity]
 		key := github.IdentityKey(rs.Identity)
@@ -201,8 +183,8 @@ func buildLoopView(
 			CanRerequest:       rs.CanRerequest,
 			BlockReason:        rs.BlockReason,
 			UnresolvedComments: unresolvedComments,
-			// Full mode: emit the body drill-in command so the agent can read the
-			// review body (findings not tied to any inline thread) on demand.
+			// Full mode: emit the body drill-in command so the agent can read
+			// the review body (findings not tied to any inline thread) on demand.
 			ChangesRequested:      rs.ChangesRequested,
 			LatestReviewState:     rs.LatestReviewState,
 			LatestReviewCommitOID: rs.LatestReviewCommitOID,
@@ -217,7 +199,7 @@ func buildLoopView(
 	}
 }
 
-// filterConditionsByKind returns only those conditions whose Kind is in the allow-list.
+// filterConditionsByKind returns only conditions whose Kind is in the allow-list.
 func filterConditionsByKind(conditions []core.Condition, kinds ...core.ConditionKind) []core.Condition {
 	allow := make(map[core.ConditionKind]bool, len(kinds))
 	for _, k := range kinds {
@@ -234,7 +216,7 @@ func filterConditionsByKind(conditions []core.Condition, kinds ...core.Condition
 
 // buildConciseLoopView builds a LoopView for the check path.
 // It uses only snapshot.Threads to count unresolved comments per reviewer —
-// no ThreadComments round-trip is needed, keeping check fast and output lean.
+// no ThreadComments round-trip needed, keeping check fast and output lean.
 func buildConciseLoopView(
 	state reviewer.LoopState,
 	snapshot reviewer.Snapshot,

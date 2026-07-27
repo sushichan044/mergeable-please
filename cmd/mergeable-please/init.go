@@ -1,4 +1,4 @@
-package cmd
+package main
 
 import (
 	"fmt"
@@ -6,7 +6,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newInitCmd(d deps) *cobra.Command {
+func newInitCmd(r runner) *cobra.Command {
 	return &cobra.Command{
 		Use:   "init",
 		Short: "Create a default .mergeable-please.yml in the current repository",
@@ -22,17 +22,16 @@ This command refuses to overwrite an existing config.`,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return runInit(d)
+			return runInit(r)
 		},
 	}
 }
 
-func runInit(d deps) error {
-	path, err := d.initConfig()
+func runInit(r runner) error {
+	report, err := r.app.Init()
 	if err != nil {
-		return fmt.Errorf("could not initialize config: %w", err)
+		return err
 	}
-
-	_, err = fmt.Fprintf(d.out, "Created %s\n", path)
+	_, err = fmt.Fprintf(r.out, "Created %s\n", report.Path)
 	return err
 }

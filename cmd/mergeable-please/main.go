@@ -2,14 +2,13 @@ package main
 
 import (
 	"context"
-	"embed"
 	"errors"
 	"fmt"
 	"os"
 
 	"github.com/Songmu/skillsmith"
 
-	"github.com/sushichan044/mergeable-please/cmd"
+	mergeableplease "github.com/sushichan044/mergeable-please"
 	"github.com/sushichan044/mergeable-please/internal/version"
 )
 
@@ -20,12 +19,6 @@ const (
 	exitError   = 2 // usage, configuration, or API error
 )
 
-// skillsFS embeds the agent skill shipped with the binary. skillsmith strips
-// the leading "skills/" directory automatically.
-//
-//go:embed skills
-var skillsFS embed.FS
-
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
@@ -33,7 +26,7 @@ func main() {
 // run dispatches the CLI and returns the process exit code.
 func run(args []string) int {
 	if len(args) > 0 && args[0] == "skills" {
-		s, err := skillsmith.New("mergeable-please", version.Semver(), skillsFS)
+		s, err := skillsmith.New("mergeable-please", version.Semver(), mergeableplease.SkillsFS)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return exitError
@@ -45,10 +38,10 @@ func run(args []string) int {
 		return exitOK
 	}
 
-	if err := cmd.Execute(os.Stdout); err != nil {
+	if err := Execute(os.Stdout); err != nil {
 		// ErrBlocked is an expected outcome: the full diagnosis (including the
 		// status line) was already rendered to stdout, so don't print again.
-		if errors.Is(err, cmd.ErrBlocked) {
+		if errors.Is(err, ErrBlocked) {
 			return exitBlocked
 		}
 		fmt.Fprintln(os.Stderr, err)
